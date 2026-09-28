@@ -3,9 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "description": "Owner-controlled Telegram broadcaster for connected groups and channels.",
-  "main": "src/index.js",
+  "main": "src/main.js",
   "scripts": {
-    "start": "node src/index.js",
+    "start": "node src/main.js",
     "cleanup": "node scripts/db-cleanup.js"
   },
   "engines": {

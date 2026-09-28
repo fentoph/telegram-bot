@@ -4,7 +4,15 @@
   "private": true,
   "description": "Owner-controlled Telegram broadcaster for connected groups and channels.",
   "main": "src/index.js",
-  "scripts": {"start": "node src/index.js"},
-  "engines": {"node": ">=20"},
-  "dependencies": {"express": "^5.1.0", "pg": "^8.16.3"}
+  "scripts": {
+    "start": "node src/index.js",
+    "cleanup": "node scripts/db-cleanup.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "pg": "^8.16.3"
+  }
 }

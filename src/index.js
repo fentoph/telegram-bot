@@ -204,6 +204,29 @@ app.get("/health", async (_req, res) => {
   }
 });
 
+app.get("/cron/db-cleanup", async (req, res) => {
+  const expected = process.env.DB_CLEANUP_SECRET || "";
+  const supplied = String(req.query.token || "");
+  if (!expected || supplied.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(expected))) {
+    return res.sendStatus(401);
+  }
+
+  try {
+    const retentionDays = Number(process.env.BROADCAST_LOG_RETENTION_DAYS || 30);
+    if (!Number.isInteger(retentionDays) || retentionDays < 1 || retentionDays > 3650) {
+      return res.status(500).json({ ok: false, error: "Invalid retention configuration" });
+    }
+    const result = await pool.query(
+      "DELETE FROM broadcast_logs WHERE created_at < NOW() - ($1::int * INTERVAL '1 day')",
+      [retentionDays]
+    );
+    return res.json({ ok: true, deletedBroadcastLogs: result.rowCount, retentionDays });
+  } catch (e) {
+    console.error("DB cleanup failed:", e);
+    return res.status(500).json({ ok: false });
+  }
+});
+
 app.post("/telegram/webhook", async (req, res) => {
   if (WEBHOOK_SECRET) {
     const s = req.get("x-telegram-bot-api-secret-token");

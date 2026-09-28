@@ -206,7 +206,10 @@ app.get("/health", async (_req, res) => {
 
 app.get("/cron/db-cleanup", async (req, res) => {
   const expected = process.env.DB_CLEANUP_SECRET || "";
-  const supplied = String(req.query.token || "");
+  const queryToken = String(req.query.token || "");
+  const auth = String(req.get("authorization") || "");
+  const headerToken = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  const supplied = headerToken || queryToken;
   if (!expected || supplied.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(expected))) {
     return res.sendStatus(401);
   }

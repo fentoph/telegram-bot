@@ -101,7 +101,19 @@ async function sendText(chatId, text) {
 
 async function connectChat(m) {
   const c = m.chat;
-  if (!["group", "supergroup", "channel"].includes(c.type)) return;
+  if (c.type === "private") {
+    return sendText(
+      c.id,
+      "ℹ️ /connect buyrug'ini botni ulamoqchi bo'lgan guruh yoki kanalda yuboring.\n\n" +
+      "1. Botni guruh/kanalga qo'shing.\n" +
+      "2. Botga kerakli administrator huquqlarini bering.\n" +
+      "3. Shu chatning o'zida /connect yuboring.\n\n" +
+      "Shundan keyin chat broadcast ro'yxatiga qo'shiladi."
+    );
+  }
+  if (!["group", "supergroup", "channel"].includes(c.type)) {
+    return sendText(c.id, "❌ /connect faqat guruh yoki kanalda ishlaydi.");
+  }
   if (c.type !== "channel" && (!m.from || !(await isChatAdmin(c.id, m.from.id)))) {
     return sendText(c.id, "❌ Faqat guruh administratori botni ulashi mumkin.");
   }

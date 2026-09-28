@@ -68,6 +68,11 @@ function getCommand(text) {
   return text.trim().split(/\s+/)[0].split("@")[0].toLowerCase();
 }
 
+function getCommandArgs(text) {
+  if (!text || !text.startsWith("/")) return [];
+  return text.trim().split(/\s+/).slice(1);
+}
+
 async function saveChat(c) {
   await pool.query(
     `INSERT INTO telegram_chats(chat_id,type,title,username,active)
@@ -95,42 +100,127 @@ async function isChatAdmin(chatId, userId) {
   return admins.some(a => String(a.user.id) === String(userId));
 }
 
+async function getBotMember(chatId) {
+  const me = await telegram("getMe");
+  return telegram("getChatMember", { chat_id: chatId, user_id: me.id });
+}
+
+async function verifyBotCanBroadcast(c) {
+  const member = await getBotMember(c.id);
+  if (!["administrator", "creator"].includes(member.status)) {
+    throw new Error("Bot chatda administrator emas.");
+  }
+
+  if (c.type === "channel" && member.status === "administrator" && member.can_post_messages !== true) {
+    throw new Error("Bot kanal administratori, lekin 'Post Messages / Xabar joylash' huquqi berilmagan.");
+  }
+
+  if (["group", "supergroup"].includes(c.type) && member.status === "administrator" && member.can_post_messages === false) {
+    throw new Error("Botda guruhga xabar yuborish huquqi yo'q.");
+  }
+
+  return member;
+}
+
+async function resolveAndConnect(chatRef, userId) {
+  const c = await telegram("getChat", { chat_id: chatRef });
+
+  if (!["group", "supergroup", "channel"].includes(c.type)) {
+    throw new Error("Faqat guruh, superguruh yoki kanal ulanishi mumkin.");
+  }
+
+  if (userId != null && !(await isChatAdmin(c.id, userId))) {
+    throw new Error("Siz ushbu chat administratori emassiz.");
+  }
+
+  await verifyBotCanBroadcast(c);
+  await saveChat(c);
+  return c;
+}
+
 async function sendText(chatId, text) {
   return telegram("sendMessage", { chat_id: chatId, text, disable_web_page_preview: true });
 }
 
 async function connectChat(m) {
+  const args = getCommandArgs(m.text || m.caption);
   const c = m.chat;
+
+  // The reliable channel flow: admin sends /connect @channelusername to the bot privately.
   if (c.type === "private") {
+    if (!isAdmin(m)) return sendText(c.id, "❌ Sizda ushbu botdan foydalanish huquqi yo'q.");
+
+    if (!args.length) {
+      return sendText(
+        c.id,
+        "🔗 Chat ulash\n\n" +
+        "Guruh yoki kanalni botga ulash uchun:\n" +
+        "/connect @username\n\n" +
+        "Masalan:\n/connect @fentoph_channel\n\n" +
+        "Kanal uchun bot administrator bo'lishi va 'Post Messages / Xabar joylash' huquqiga ega bo'lishi kerak."
+      );
+    }
+
+    try {
+      const target = await resolveAndConnect(args[0], m.from.id);
+      return sendText(
+        c.id,
+        `✅ Chat muvaffaqiyatli ulandi.\n\n${target.type === "channel" ? "📣 Kanal" : "👥 Guruh"}: ${target.title || target.username || target.id}\n🆔 ${target.id}`
+      );
+    } catch (e) {
+      return sendText(c.id, `❌ Ulanmadi.\n\n${String(e.message || e)}`);
+    }
+  }
+
+  if (!["group", "supergroup", "channel"].includes(c.type)) {
+    return sendText(c.id, "❌ /connect faqat guruh, superguruh yoki kanalda ishlaydi.");
+  }
+
+  try {
+    // In a channel_post there is no normal m.from user. The bot's admin status
+    // is therefore the authoritative check for a direct channel /connect.
+    if (c.type !== "channel" && (!m.from || !(await isChatAdmin(c.id, m.from.id)))) {
+      return sendText(c.id, "❌ Faqat chat administratori botni ulashi mumkin.");
+    }
+
+    await resolveAndConnect(c.id, c.type === "channel" ? null : m.from.id);
     return sendText(
       c.id,
-      "ℹ️ /connect buyrug'ini botni ulamoqchi bo'lgan guruh yoki kanalda yuboring.\n\n" +
-      "1. Botni guruh/kanalga qo'shing.\n" +
-      "2. Botga kerakli administrator huquqlarini bering.\n" +
-      "3. Shu chatning o'zida /connect yuboring.\n\n" +
-      "Shundan keyin chat broadcast ro'yxatiga qo'shiladi."
+      `✅ Ulandi: ${c.title || "Telegram chat"}\n\nBu ${c.type === "channel" ? "kanal" : "chat"} broadcast ro'yxatiga qo'shildi.`
     );
-  }
-  if (!["group", "supergroup", "channel"].includes(c.type)) {
-    return sendText(c.id, "❌ /connect faqat guruh yoki kanalda ishlaydi.");
-  }
-  if (c.type !== "channel" && (!m.from || !(await isChatAdmin(c.id, m.from.id)))) {
-    return sendText(c.id, "❌ Faqat guruh administratori botni ulashi mumkin.");
-  }
-  await saveChat(c);
-  if (c.type !== "channel") {
-    await sendText(c.id, `✅ Ulandi: ${c.title || "Telegram chat"}\n\nBu chat broadcast ro'yxatiga qo'shildi.`);
+  } catch (e) {
+    return sendText(c.id, `❌ Chatni ulab bo'lmadi.\n\n${String(e.message || e)}`);
   }
 }
 
 async function disconnectChat(m) {
+  const args = getCommandArgs(m.text || m.caption);
   const c = m.chat;
-  if (!["group", "supergroup", "channel"].includes(c.type)) return;
-  if (c.type !== "channel" && (!m.from || !(await isChatAdmin(c.id, m.from.id)))) {
-    return sendText(c.id, "❌ Faqat guruh administratori botni uzishi mumkin.");
+
+  if (c.type === "private") {
+    if (!isAdmin(m)) return sendText(c.id, "❌ Sizda ushbu botdan foydalanish huquqi yo'q.");
+    if (!args.length) return sendText(c.id, "🔗 Uzish uchun:\n/disconnect @username");
+
+    try {
+      const target = await telegram("getChat", { chat_id: args[0] });
+      await deactivateChat(target.id);
+      return sendText(c.id, `🔴 Uzildi: ${target.title || target.username || target.id}`);
+    } catch (e) {
+      return sendText(c.id, `❌ Chatni uzib bo'lmadi.\n\n${String(e.message || e)}`);
+    }
   }
-  await deactivateChat(c.id);
-  if (c.type !== "channel") await sendText(c.id, "🔴 Ushbu chat broadcast ro'yxatidan chiqarildi.");
+
+  if (!["group", "supergroup", "channel"].includes(c.type)) return;
+
+  try {
+    if (c.type !== "channel" && (!m.from || !(await isChatAdmin(c.id, m.from.id)))) {
+      return sendText(c.id, "❌ Faqat chat administratori botni uzishi mumkin.");
+    }
+    await deactivateChat(c.id);
+    return sendText(c.id, "🔴 Ushbu chat broadcast ro'yxatidan chiqarildi.");
+  } catch (e) {
+    return sendText(c.id, `❌ Uzib bo'lmadi.\n\n${String(e.message || e)}`);
+  }
 }
 
 async function listChats(m) {
@@ -148,7 +238,7 @@ async function adminPanel(m) {
   const chats = await getActiveChats();
   return sendText(
     m.chat.id,
-    "🛠 ADMIN PANEL\n\n👥 Ulangan chatlar: " + chats.length + " ta\n\n/groups — ulangan chatlar\n/connect — ulash\n/disconnect — uzish"
+    "🛠 ADMIN PANEL\n\n👥 Ulangan chatlar: " + chats.length + " ta\n\n/groups — ulangan chatlar\n/connect @username — chat ulash\n/disconnect @username — chatni uzish"
   );
 }
 
@@ -191,13 +281,14 @@ async function handleUpdate(u) {
 
   if (cmd === "/connect") return connectChat(m);
   if (cmd === "/disconnect") return disconnectChat(m);
+
   if (m.chat.type !== "private") return;
   if (!isAdmin(m)) return sendText(m.chat.id, "❌ Sizda ushbu botdan foydalanish huquqi yo'q.");
 
   if (cmd === "/start" || cmd === "/help") {
     return sendText(
       m.chat.id,
-      "🤖 Telegram Broadcast Bot\n\nMenga yuborgan xabaringiz ulangan barcha guruh va kanallarga nusxalanadi.\n\n/admin — admin panel\n/groups — ulangan chatlar\n/help — yordam"
+      "🤖 Telegram Broadcast Bot\n\nMenga yuborgan xabaringiz ulangan barcha guruh va kanallarga nusxalanadi.\n\n/admin — admin panel\n/groups — ulangan chatlar\n/connect @username — chat ulash\n/disconnect @username — chatni uzish\n/help — yordam"
     );
   }
 

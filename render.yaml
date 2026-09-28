@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: asdewqrty
+    runtime: node
+    plan: free
+    buildCommand: npm ci
+    startCommand: npm start
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_OWNER_ID
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: TELEGRAM_WEBHOOK_SECRET
+        generateValue: true
+      - key: NODE_VERSION
+        value: "20"
+    healthCheckPath: /health

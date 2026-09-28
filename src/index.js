@@ -4,11 +4,11 @@ const crypto = require("crypto");
 
 const PORT = Number(process.env.PORT || 10000);
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const OWNER_ID = String(process.env.TELEGRAM_OWNER_ID || "");
+const ADMIN_IDS = String(process.env.TELEGRAM_ADMIN_IDS || process.env.TELEGRAM_OWNER_ID || "").split(",").map(v => v.trim()).filter(Boolean);
 const WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET || "";
 
 if (!TOKEN) throw new Error("TELEGRAM_BOT_TOKEN is required");
-if (!OWNER_ID) throw new Error("TELEGRAM_OWNER_ID is required");
+if (!ADMIN_IDS.length) throw new Error("TELEGRAM_ADMIN_IDS is required");
 if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL is required");
 
 const app = express();
@@ -37,7 +37,7 @@ async function initDb() {
   CREATE INDEX IF NOT EXISTS idx_telegram_chats_active ON telegram_chats(active);
   CREATE INDEX IF NOT EXISTS idx_broadcast_logs_created_at ON broadcast_logs(created_at DESC);`);
 }
-function isOwner(m){ return String(m?.from?.id || "") === OWNER_ID; }
+function isAdmin(m){ return ADMIN_IDS.includes(String(m?.from?.id || "")); }
 function getMessage(u){ return u.message || u.channel_post || null; }
 function getCommand(text){ if(!text || !text.startsWith("/")) return null; return text.trim().split(/\s+/)[0].split("@")[0].toLowerCase(); }
 async function saveChat(c){ await pool.query(`INSERT INTO telegram_chats(chat_id,type,title,username,active) VALUES($1,$2,$3,$4,TRUE)
@@ -59,11 +59,11 @@ async function disconnectChat(m){
   await deactivateChat(c.id); if(c.type!=="channel") await sendText(c.id,"🔴 Ushbu chat broadcast ro'yxatidan chiqarildi.");
 }
 async function listChats(m){
-  if(!isOwner(m)) return; const chats=await getActiveChats();
+  if(!isAdmin(m)) return; const chats=await getActiveChats();
   if(!chats.length) return sendText(m.chat.id,"📡 Hozircha ulangan guruh yoki kanallar yo'q.");
   await sendText(m.chat.id,`📡 Ulangan chatlar: ${chats.length} ta\n\n${chats.map((c,i)=>`${i+1}. ${c.type==="channel"?"📣":"👥"} ${c.title||c.username||c.chat_id} (${c.chat_id})`).join("\n")}`);
 }
-async function broadcast(m){
+async function adminPanel(m){ if(!isAdmin(m)) return; const chats=await getActiveChats(); return sendText(m.chat.id, "🛠 ADMIN PANEL\n\n👥 Ulangan chatlar: " + chats.length + " ta\n\n/groups — ulangan chatlar\n/connect — ulash\n/disconnect — uzish"); }\nasync function broadcast(m){
   const chats=await getActiveChats(); let sent=0,failed=0;
   for(const c of chats){
     try{
@@ -82,9 +82,9 @@ async function handleUpdate(u){
   const m=getMessage(u); if(!m) return; const cmd=getCommand(m.text||m.caption);
   if(cmd==="/connect") return connectChat(m); if(cmd==="/disconnect") return disconnectChat(m);
   if(m.chat.type!=="private") return;
-  if(!isOwner(m)) return sendText(m.chat.id,"❌ Sizda ushbu botdan foydalanish huquqi yo'q.");
-  if(cmd==="/start"||cmd==="/help") return sendText(m.chat.id,"🤖 Telegram Broadcast Bot\n\nMenga yuborgan xabaringiz ulangan barcha guruh va kanallarga nusxalanadi.\n\n/groups — ulangan chatlar\n/help — yordam");
-  if(cmd==="/groups") return listChats(m); if(cmd) return; return broadcast(m);
+  if(!isAdmin(m)) return sendText(m.chat.id,"❌ Sizda ushbu botdan foydalanish huquqi yo'q.");
+  if(cmd==="/start"||cmd==="/help") return sendText(m.chat.id,"🤖 Telegram Broadcast Bot\n\nMenga yuborgan xabaringiz ulangan barcha guruh va kanallarga nusxalanadi.\n\n/admin — admin panel\n/groups — ulangan chatlar\n/help — yordam");
+  if(cmd==="/admin") return adminPanel(m); if(cmd==="/groups") return listChats(m); if(cmd) return; return broadcast(m);
 }
 app.get("/health",async(_req,res)=>{try{await pool.query("SELECT 1");res.json({ok:true,service:"telegram-bot"});}catch{res.status(503).json({ok:false});}});
 app.post("/telegram/webhook",async(req,res)=>{

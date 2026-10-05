@@ -244,36 +244,224 @@ async function adminPanel(m) {
   );
 }
 
-async function broadcast(m) {
+const BROADCAST_BATCH_WINDOW_MS = 10_000;
+const MAX_TELEGRAM_TEXT_LENGTH = 4096;
+const broadcastBatches = new Map();
+
+function isPhotoOrVideo(m) {
+  return Boolean(m?.photo?.length || m?.video);
+}
+
+function getBroadcastBatchKey(m) {
+  return \`${String(m.chat.id)}:${String(m.from?.id || "owner")}\`;
+}
+
+function getMessageText(m) {
+  return typeof m?.text === "string" ? m.text : typeof m?.caption === "string" ? m.caption : "";
+}
+
+function splitText(text) {
+  const chunks = [];
+  let rest = String(text || "");
+
+  while (rest.length > MAX_TELEGRAM_TEXT_LENGTH) {
+    let cut = rest.lastIndexOf("\n", MAX_TELEGRAM_TEXT_LENGTH);
+    if (cut < 1) cut = MAX_TELEGRAM_TEXT_LENGTH;
+    chunks.push(rest.slice(0, cut));
+    rest = rest.slice(cut).replace(/^\n+/, "");
+  }
+
+  if (rest) chunks.push(rest);
+  return chunks;
+}
+
+function toInputMedia(m) {
+  if (m.photo?.length) {
+    const largest = m.photo[m.photo.length - 1];
+    return {
+      type: "photo",
+      media: largest.file_id,
+      ...(m.caption ? { caption: m.caption } : {}),
+      ...(m.caption_entities?.length ? { caption_entities: m.caption_entities } : {}),
+      ...(m.has_spoiler ? { has_spoiler: true } : {})
+    };
+  }
+
+  if (m.video) {
+    return {
+      type: "video",
+      media: m.video.file_id,
+      ...(m.caption ? { caption: m.caption } : {}),
+      ...(m.caption_entities?.length ? { caption_entities: m.caption_entities } : {}),
+      ...(m.has_spoiler ? { has_spoiler: true } : {}),
+      ...(m.video.supports_streaming ? { supports_streaming: true } : {})
+    };
+  }
+
+  return null;
+}
+
+async function logBroadcastResult(sourceMessages, targetChatId, status, error = null) {
+  for (const source of sourceMessages) {
+    if (status === "sent") {
+      await pool.query(
+        "INSERT INTO broadcast_logs(source_message_id,source_chat_id,target_chat_id,status) VALUES($1,$2,$3,'sent')",
+        [source.message_id, String(source.chat.id), targetChatId]
+      );
+    } else {
+      await pool.query(
+        "INSERT INTO broadcast_logs(source_message_id,source_chat_id,target_chat_id,status,error) VALUES($1,$2,$3,'failed',$4)",
+        [source.message_id, String(source.chat.id), targetChatId, error]
+      );
+    }
+  }
+}
+
+async function sendBatchToChat(c, messages) {
+  const sorted = [...messages].sort((a, b) => Number(a.message_id) - Number(b.message_id));
+  const sentMessages = [];
+  const media = [];
+  const unsupported = [];
+
+  const flushMedia = async () => {
+    if (!media.length) return;
+
+    if (media.length === 1) {
+      await telegram("copyMessage", {
+        chat_id: c.chat_id,
+        from_chat_id: sorted[0].chat.id,
+        message_id: media[0].message_id
+      });
+    } else {
+      for (let i = 0; i < media.length; i += 10) {
+        const chunk = media.slice(i, i + 10);
+        await telegram("sendMediaGroup", {
+          chat_id: c.chat_id,
+          media: chunk.map(toInputMedia)
+        });
+      }
+    }
+
+    sentMessages.push(...media);
+    media.length = 0;
+  };
+
+  const flushText = async (textMessages) => {
+    if (!textMessages.length) return;
+
+    const text = textMessages
+      .map(getMessageText)
+      .filter(Boolean)
+      .join("\n\n");
+
+    if (!text) return;
+
+    for (const chunk of splitText(text)) {
+      await telegram("sendMessage", {
+        chat_id: c.chat_id,
+        text: chunk,
+        disable_web_page_preview: true
+      });
+    }
+
+    sentMessages.push(...textMessages);
+  };
+
+  let textMessages = [];
+
+  for (const message of sorted) {
+    if (isPhotoOrVideo(message)) {
+      await flushText(textMessages);
+      textMessages = [];
+      media.push(message);
+      continue;
+    }
+
+    const hasText = Boolean(getMessageText(message));
+    if (hasText) {
+      textMessages.push(message);
+      continue;
+    }
+
+    await flushText(textMessages);
+    textMessages = [];
+    await flushMedia();
+
+    await telegram("copyMessage", {
+      chat_id: c.chat_id,
+      from_chat_id: message.chat.id,
+      message_id: message.message_id
+    });
+    unsupported.push(message);
+  }
+
+  await flushText(textMessages);
+  await flushMedia();
+
+  sentMessages.push(...unsupported);
+  return sentMessages;
+}
+
+async function broadcastBatch(messages) {
+  if (!messages.length) return;
+
   const chats = await getActiveChats();
   let sent = 0;
   let failed = 0;
 
   for (const c of chats) {
     try {
-      await telegram("copyMessage", {
-        chat_id: c.chat_id,
-        from_chat_id: m.chat.id,
-        message_id: m.message_id
-      });
-      await pool.query(
-        "INSERT INTO broadcast_logs(source_message_id,source_chat_id,target_chat_id,status) VALUES($1,$2,$3,'sent')",
-        [m.message_id, String(m.chat.id), c.chat_id]
-      );
-      sent++;
+      const delivered = await sendBatchToChat(c, messages);
+      await logBroadcastResult(delivered, c.chat_id, "sent");
+      sent += delivered.length;
     } catch (e) {
-      failed++;
+      failed += messages.length;
       const err = String(e.message || e).slice(0, 1000);
-      await pool.query(
-        "INSERT INTO broadcast_logs(source_message_id,source_chat_id,target_chat_id,status,error) VALUES($1,$2,$3,'failed',$4)",
-        [m.message_id, String(m.chat.id), c.chat_id, err]
-      );
-      if (/chat not found|kicked|not enough rights|forbidden/i.test(err)) await deactivateChat(c.chat_id);
+      await logBroadcastResult(messages, c.chat_id, "failed", err);
+
+      if (/chat not found|kicked|not enough rights|forbidden/i.test(err)) {
+        await deactivateChat(c.chat_id);
+      }
     }
+
     await new Promise(r => setTimeout(r, 55));
   }
 
-  await sendText(m.chat.id, `📢 Broadcast yakunlandi.\n\n✅ Yetkazildi: ${sent}\n❌ Xatolik: ${failed}`);
+  const sourceChatId = messages[0].chat.id;
+  await sendText(
+    sourceChatId,
+    \`📢 Broadcast yakunlandi.\\n\\n📦 Yig'ilgan xabarlar: ${messages.length} ta\\n✅ Yetkazildi: ${sent} ta\\n❌ Xatolik: ${failed} ta\`
+  );
+}
+
+function queueBroadcast(m) {
+  const key = getBroadcastBatchKey(m);
+  let batch = broadcastBatches.get(key);
+
+  if (!batch) {
+    batch = { messages: [], timer: null };
+    broadcastBatches.set(key, batch);
+  }
+
+  batch.messages.push(m);
+
+  if (batch.timer) clearTimeout(batch.timer);
+
+  batch.timer = setTimeout(async () => {
+    broadcastBatches.delete(key);
+    try {
+      await broadcastBatch(batch.messages);
+    } catch (e) {
+      console.error("Broadcast batch failed:", e);
+      try {
+        await sendText(m.chat.id, "❌ Broadcast vaqtida xatolik yuz berdi.");
+      } catch {}
+    }
+  }, BROADCAST_BATCH_WINDOW_MS);
+}
+
+async function broadcast(m) {
+  queueBroadcast(m);
 }
 
 async function handleUpdate(u) {

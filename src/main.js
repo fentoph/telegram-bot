@@ -253,7 +253,7 @@ function isPhotoOrVideo(m) {
 }
 
 function getBroadcastBatchKey(m) {
-  return \`${String(m.chat.id)}:${String(m.from?.id || "owner")}\`;
+  return `${String(m.chat.id)}:${String(m.from?.id || "owner")}`;
 }
 
 function getMessageText(m) {
@@ -430,7 +430,7 @@ async function broadcastBatch(messages) {
   const sourceChatId = messages[0].chat.id;
   await sendText(
     sourceChatId,
-    \`📢 Broadcast yakunlandi.\\n\\n📦 Yig'ilgan xabarlar: ${messages.length} ta\\n✅ Yetkazildi: ${sent} ta\\n❌ Xatolik: ${failed} ta\`
+    `📢 Broadcast yakunlandi.\n\n📦 Yig'ilgan xabarlar: ${messages.length} ta\n✅ Yetkazildi: ${sent} ta\n❌ Xatolik: ${failed} ta`
   );
 }
 
